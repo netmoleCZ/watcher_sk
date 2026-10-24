@@ -1,0 +1,54 @@
+name: Fetch SHMU ALADIN-SK Forecast
+
+on:
+  # Four times a day. The exact times are not load-bearing: GitHub delays scheduled runs
+  # by unpredictable amounts, and a delay that pushes the job across a 6-hour boundary
+  # used to make it target a model run SHMU had not published yet, failing the whole run.
+  # The script now walks back to older runs instead, so a late start costs one wasted
+  # request rather than a lost cycle.
+  schedule:
+    - cron: '30 2  * * *'
+    - cron: '30 8  * * *'
+    - cron: '30 14 * * *'
+    - cron: '30 20 * * *'
+  workflow_dispatch:
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install eccodes system library
+        run: sudo apt-get install -y --no-install-recommends libeccodes-dev
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Fetch and transform
+        run: python scripts/fetch_shmu_aladin.py
+
+      - name: Clean up temp GRIB files
+        if: always()
+        run: find /tmp -maxdepth 1 -name '*.grb' -delete 2>/dev/null || true
+
+      - name: Publish (orphan commit — keeps repo size flat)
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add shmu_aladin.json
+          git diff --staged --quiet && echo "No changes — skipping commit" && exit 0
+          # Replace history entirely so the data repo stays at 1 commit regardless
+          # of how many times the workflow runs. Consumers always fetch latest main.
+          git checkout --orphan publish-tmp
+          git add shmu_aladin.json config/stations.json requirements.txt
+          git commit -m "shmu-aladin: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git push origin HEAD:main --force-with-lease
